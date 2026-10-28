@@ -1,0 +1,79 @@
+# Push a tag like v1.2.0 → tests, signed + notarized Tuck.app, GitHub release with the zip and Sparkle's appcast.xml.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: xcode-27  # preview image; macos-26 tops out at Xcode 26.6, whose Swift 6.3 has IRGen crashes
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo xcode-select -s /Applications/Xcode_27.1.app
+
+      - run: swift test
+
+      - name: Import Developer ID certificate
+        env:
+          P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          keychain=$RUNNER_TEMP/signing.keychain-db
+          pass=$(uuidgen)
+          echo "$P12" | base64 --decode > $RUNNER_TEMP/cert.p12
+          security create-keychain -p "$pass" $keychain
+          security set-keychain-settings -lut 21600 $keychain
+          security unlock-keychain -p "$pass" $keychain
+          security import $RUNNER_TEMP/cert.p12 -k $keychain -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$pass" $keychain
+          security list-keychains -d user -s $keychain $(security list-keychains -d user | tr -d '"')
+          rm $RUNNER_TEMP/cert.p12
+
+      - name: Build, sign, notarize
+        env:
+          SIGN_IDENTITY: Developer ID Application
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_KEY_B64: ${{ secrets.NOTARY_KEY }}
+        run: |
+          export NOTARY_KEY=$RUNNER_TEMP/notary.p8
+          echo "$NOTARY_KEY_B64" | base64 --decode > $NOTARY_KEY
+          scripts/build-app.sh "${GITHUB_REF_NAME#v}"
+          spctl --assess --type execute -vv .build/Tuck.app
+
+      # Sparkle reads releases/latest/download/appcast.xml, so every release carries a one-item feed.
+      - name: Write appcast
+        env:
+          SPARKLE_ED_KEY: ${{ secrets.SPARKLE_ED_KEY }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          echo "$SPARKLE_ED_KEY" > $RUNNER_TEMP/sparkle.key
+          sig=$(.build/artifacts/sparkle/Sparkle/bin/sign_update --ed-key-file $RUNNER_TEMP/sparkle.key .build/Tuck-$version.zip)
+          rm $RUNNER_TEMP/sparkle.key
+          release=https://github.com/$GITHUB_REPOSITORY/releases
+          cat > .build/appcast.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>Tuck</title>
+              <item>
+                <title>Tuck $version</title>
+                <pubDate>$(date -R)</pubDate>
+                <sparkle:version>$version</sparkle:version>
+                <sparkle:shortVersionString>$version</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+                <sparkle:fullReleaseNotesLink>$release/tag/$GITHUB_REF_NAME</sparkle:fullReleaseNotesLink>
+                <enclosure url="$release/download/$GITHUB_REF_NAME/Tuck-$version.zip" type="application/octet-stream" $sig/>
+              </item>
+            </channel>
+          </rss>
+          EOF
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" .build/Tuck-*.zip .build/appcast.xml --title "Tuck ${GITHUB_REF_NAME#v}" --generate-notes
