@@ -89,6 +89,15 @@ final class NotchController {
         }
     }
 
+    /// Grows the notch and fills the arming bar; opens once the hover delay has passed.
+    func arm() {
+        withAnimation(Self.animation) { model.phase = .arming }
+        armTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(UserDefaults.standard.double(forKey: "hoverDelay")))
+            if !Task.isCancelled { self?.open() }
+        }
+    }
+
     func open() {
         armTask?.cancel()
         panel.ignoresMouseEvents = false
@@ -140,11 +149,7 @@ final class NotchController {
 
         switch (model.phase, inside) {
         case (.idle, true):
-            withAnimation(Self.animation) { model.phase = .arming }
-            armTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(UserDefaults.standard.double(forKey: "hoverDelay")))
-                if !Task.isCancelled { self?.open() }
-            }
+            arm()
         case (.arming, false):
             armTask?.cancel()
             withAnimation(Self.closeAnimation) { model.phase = .idle }
