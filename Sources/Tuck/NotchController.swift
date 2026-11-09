@@ -11,9 +11,26 @@ final class NotchModel {
     static let inputHeight: CGFloat = 49
     static let maxRows = 7
 
+    /// On Macs with a Dynamic Island the camera is a pill inside the menu bar, not a notch hanging from the top edge.
+    /// The public API reports only its bounding box from the top edge; the pill itself starts 9.5 pt below it
+    /// (70 × 38 pt on a 14" MacBook Pro, read once from the private `_centerHUDMinimalObstructionFrame`).
+    static let islandTopInset: CGFloat = 9.5
+    /// macOS grows its own black pill about its center when hovered (MenuBarAgent's `hoverScale`), measured from photos.
+    static let islandHoverScale: CGFloat = 1.15
+    /// How far the shape reaches past the pill while hovered or open: less than the system's hover growth,
+    /// so ours stays hidden inside the system's pill until the panel opens.
+    static let islandGrow: CGFloat = 3
+    /// From the system's hovered pill to the middle of the arming ring's stroke. The ring then just fits the menu bar.
+    static let islandRingOutset: CGFloat = 2.5
+    static let islandOpenRadius: CGFloat = 28
+    /// The most the hovered pill leans toward the pointer, by eye: the system's own limit isn't readable.
+    static let islandLean = CGSize(width: 5, height: 2.5)
+
     var phase = Phase.idle
     var notch = CGSize(width: 190, height: 32)
     var hasNotch = false
+    var isIsland = false
+    var lean = CGSize.zero  // while arming on the island, see NotchController.updateLean
     var draft = ""
     var list: TodoList { didSet { save() } }
     @ObservationIgnored private let fileURL: URL
@@ -27,12 +44,25 @@ final class NotchModel {
         list.items.isEmpty ? 56 : CGFloat(min(list.items.count, Self.maxRows)) * Self.rowHeight + 12
     }
 
+    var pill: CGSize { CGSize(width: notch.width, height: notch.height - Self.islandTopInset) }
+    var grownPill: CGSize { CGSize(width: pill.width + 2 * Self.islandGrow, height: pill.height + 2 * Self.islandGrow) }
+
+    /// The top row of the open panel, which the notch or pill sits in.
+    var headerHeight: CGFloat { isIsland ? grownPill.height : notch.height }
+
+    /// Distance from the screen's top edge to the drawn shape: a notch hangs from the edge, the island floats below it.
+    var top: CGFloat {
+        guard isIsland else { return 0 }
+        return phase == .idle ? Self.islandTopInset : Self.islandTopInset - Self.islandGrow
+    }
+
     var size: CGSize {
         switch phase {
-        case .idle: notch
+        case .idle: isIsland ? pill : notch
         // The hardware notch has no pixels, so grow a visible strip below it for the arming bar.
-        case .arming: CGSize(width: notch.width + 18, height: notch.height + 14)
-        case .open: CGSize(width: Self.openWidth, height: notch.height + listHeight + Self.inputHeight)
+        // The island gets a ring around it instead (see ArmingRing).
+        case .arming: isIsland ? grownPill : CGSize(width: notch.width + 18, height: notch.height + 14)
+        case .open: CGSize(width: Self.openWidth, height: headerHeight + listHeight + Self.inputHeight)
         }
     }
 
@@ -73,6 +103,10 @@ final class NotchController {
         NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] event in
             MainActor.assumeIsolated { self?.mouseMoved() }
             return event
+        }
+        // While closed the window ignores the mouse, so a click on the notch lands in the menu bar: global is enough.
+        NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
+            MainActor.assumeIsolated { self?.mouseDown() }
         }
         if pinnedOpen { open() }
         if let path = ProcessInfo.processInfo.environment["TUCK_SNAPSHOT"] { snapshot(to: path) }
@@ -130,7 +164,10 @@ final class NotchController {
         model.hasNotch = screen.safeAreaInsets.top > 0
         if model.hasNotch, let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
             model.notch = CGSize(width: screen.frame.width - left.width - right.width, height: screen.safeAreaInsets.top)
+            // A notch is about six times as wide as it is tall; the island's bounding box is barely wider than tall.
+            model.isIsland = model.notch.width < model.notch.height * 3
         } else {
+            model.isIsland = false
             model.notch = CGSize(width: 190, height: max(screen.frame.maxY - screen.visibleFrame.maxY, 24))
         }
         let size = CGSize(width: 520, height: 480)
@@ -138,14 +175,28 @@ final class NotchController {
                               width: size.width, height: size.height), display: true)
     }
 
-    private func mouseMoved() {
-        guard let screen, !pinnedOpen else { return }
-        let size = model.phase == .idle ? model.notch : model.size
+    /// Whether the pointer is over the notch (or island), or over the open panel.
+    private func pointerInside(_ screen: NSScreen) -> Bool {
+        let open = model.phase == .open
+        // From the top edge down to the bottom of the shape, so the menu bar strip above the island counts too.
+        let size = CGSize(width: model.size.width, height: model.top + model.size.height)
         let rect = NSRect(x: screen.frame.midX - size.width / 2, y: screen.frame.maxY - size.height,
                           width: size.width, height: size.height)
-        // A little slack: the top pixel row, and a margin around the open panel so its edge isn't a tripwire.
-        let inside = rect.insetBy(dx: model.phase == .open ? -12 : 0, dy: model.phase == .open ? -12 : -2)
-            .contains(NSEvent.mouseLocation)
+        // A little slack: the top pixel row, a margin around the open panel so its edge isn't a tripwire,
+        // and room beside the island, which is a narrow target.
+        let dx: CGFloat = open ? -12 : model.isIsland ? -14 : 0
+        return rect.insetBy(dx: dx, dy: open ? -12 : -2).contains(NSEvent.mouseLocation)
+    }
+
+    /// A click or tap on the notch opens the list right away: touch screens have no hover.
+    private func mouseDown() {
+        guard let screen, model.phase != .open, pointerInside(screen) else { return }
+        open()
+    }
+
+    private func mouseMoved() {
+        guard let screen, !pinnedOpen else { return }
+        let inside = pointerInside(screen)
 
         switch (model.phase, inside) {
         case (.idle, true):
@@ -164,6 +215,24 @@ final class NotchController {
         default:
             break
         }
+        updateLean(screen)
+    }
+
+    /// macOS leans its hovered pill toward the pointer, rubber-banded (MenuBarAgent's `inertHoverLean`).
+    /// The ring and our shape lean the same way so they stay around it.
+    private func updateLean(_ screen: NSScreen) {
+        guard model.isIsland, model.phase == .arming else { return }
+        let mouse = NSEvent.mouseLocation
+        let center = CGPoint(x: screen.frame.midX, y: screen.frame.maxY - NotchModel.islandTopInset - model.pill.height / 2)
+        let lean = CGSize(width: Self.rubberband(mouse.x - center.x, limit: NotchModel.islandLean.width, range: model.pill.width / 2),
+                          height: Self.rubberband(center.y - mouse.y, limit: NotchModel.islandLean.height, range: model.pill.height / 2))
+        withAnimation(.spring(duration: 0.3, bounce: 0.15)) { model.lean = lean }
+    }
+
+    /// Follows `x` at first, then flattens toward `limit`: half of it when `x` reaches `range`.
+    private static func rubberband(_ x: CGFloat, limit: CGFloat, range: CGFloat) -> CGFloat {
+        let d = abs(x) / range
+        return (x < 0 ? -1 : 1) * limit * d / (d + 1)
     }
 }
 

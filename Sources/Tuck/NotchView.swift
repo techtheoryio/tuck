@@ -14,9 +14,44 @@ struct NotchView: View {
     var body: some View {
         let model = controller.model
         let open = model.phase == .open
-        let shape = NotchShape(radius: open ? 24 : 10)
-        VStack(spacing: 0) {
-            if open {
+        let arming = model.phase == .arming
+        Group {
+            if model.isIsland {
+                // The panel floats below the top edge and grows out of the pill; the ring sits behind it.
+                ZStack(alignment: .top) {
+                    // Around the pill macOS grows on hover, centered on the hardware pill.
+                    let outset = 2 * NotchModel.islandRingOutset
+                    let ring = CGSize(width: model.pill.width * NotchModel.islandHoverScale + outset,
+                                      height: model.pill.height * NotchModel.islandHoverScale + outset)
+                    ArmingRing(arming: arming)
+                        .frame(width: ring.width, height: ring.height)
+                        .padding(.top, NotchModel.islandTopInset + (model.pill.height - ring.height) / 2)
+                    content
+                        .blackFill(RoundedRectangle(cornerRadius: open ? NotchModel.islandOpenRadius : model.size.height / 2,
+                                                    style: .continuous), shadow: open)
+                        .padding(.top, model.top)
+                }
+                // Leans with the system's pill while hovered; back in the middle once open.
+                .offset(arming ? model.lean : .zero)
+            } else {
+                content
+                    .overlay(alignment: .bottom) { ArmingBar(arming: arming) }
+                    .padding(.horizontal, NotchShape.shoulder)
+                    .blackFill(NotchShape(radius: open ? 24 : 10), shadow: open)
+            }
+        }
+        // Without a hardware notch, stay invisible until hovered. Neither is the island drawn at rest:
+        // a black pill that missed the hardware one by a point would show.
+        .opacity(model.hasNotch && !model.isIsland || model.phase != .idle ? 1 : 0)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .environment(\.colorScheme, .dark)
+        .tint(accent)
+    }
+
+    private var content: some View {
+        let model = controller.model
+        return VStack(spacing: 0) {
+            if model.phase == .open {
                 TodoPanel(controller: controller)
                     .transition(AnyTransition.asymmetric(
                         insertion: AnyTransition(.blurReplace).animation(NotchController.animation.delay(0.04)),
@@ -25,15 +60,54 @@ struct NotchView: View {
             }
         }
         .frame(width: model.size.width, height: model.size.height, alignment: .top)
-        .overlay(alignment: .bottom) { ArmingBar(arming: model.phase == .arming) }
-        .padding(.horizontal, NotchShape.shoulder)
-        .clipShape(shape)
-        // Shadow on the plain shape only; shadowing the whole content re-renders every text layer per frame.
-        .background(shape.fill(.black).shadow(color: .black.opacity(open ? 0.5 : 0), radius: 30, y: 12))
-        .opacity(model.hasNotch || model.phase != .idle ? 1 : 0)  // without a hardware notch, stay invisible until hovered
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .environment(\.colorScheme, .dark)
-        .tint(accent)
+    }
+}
+
+private extension View {
+    /// Clips to the shape and fills it black. Shadow on the plain shape only; shadowing the whole content
+    /// re-renders every text layer per frame.
+    func blackFill<S: Shape>(_ shape: S, shadow: Bool) -> some View {
+        clipShape(shape).background(shape.fill(.black).shadow(color: .black.opacity(shadow ? 0.5 : 0), radius: 30, y: 12))
+    }
+}
+
+/// On the island: a ring that runs once around the pill, clockwise from the top, over the hover delay.
+private struct ArmingRing: View {
+    static let lineWidth: CGFloat = 2
+    let arming: Bool
+    @AppStorage("hoverDelay") private var delay = 1.8
+    @State private var progress = 0.0
+
+    var body: some View {
+        let stroke = StrokeStyle(lineWidth: Self.lineWidth, lineCap: .round)
+        PillOutline()
+            .stroke(.white.opacity(0.16), style: stroke)
+            .overlay { PillOutline().trim(from: 0, to: progress).stroke(accent, style: stroke) }
+            .opacity(arming ? 1 : 0)
+            .accessibilityHidden(true)
+            .onChange(of: arming) { _, arming in
+                // Own transactions, as in ArmingBar. Leaving early unwinds the ring; opening fades it out as it unwinds.
+                if arming {
+                    withAnimation(.linear(duration: delay)) { progress = 1 }
+                } else {
+                    withAnimation(.easeOut(duration: 0.25)) { progress = 0 }
+                }
+            }
+    }
+}
+
+/// A capsule outline that starts at the top center and runs clockwise, so trimming it fills the ring from the top.
+private struct PillOutline: Shape {
+    func path(in rect: CGRect) -> Path {
+        let r = min(rect.width, rect.height) / 2
+        var p = Path()
+        p.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        p.addLine(to: CGPoint(x: rect.maxX - r, y: rect.minY))
+        p.addArc(center: CGPoint(x: rect.maxX - r, y: rect.midY), radius: r, startAngle: .degrees(-90), endAngle: .degrees(90), clockwise: false)
+        p.addLine(to: CGPoint(x: rect.minX + r, y: rect.maxY))
+        p.addArc(center: CGPoint(x: rect.minX + r, y: rect.midY), radius: r, startAngle: .degrees(90), endAngle: .degrees(270), clockwise: false)
+        p.closeSubpath()
+        return p
     }
 }
 
@@ -77,7 +151,7 @@ private struct TodoPanel: View {
                 Text(countLabel).font(.system(size: 12, weight: .medium)).foregroundStyle(secondary)
             }
             .padding(.horizontal, 20)
-            .frame(height: model.notch.height)
+            .frame(height: model.headerHeight)
 
             ScrollView {
                 VStack(spacing: 0) {

@@ -33,7 +33,7 @@ swift test            # to-do list tests
 
 ## Using it
 
-- Rest the pointer on the notch: it grows a little and a thin bar below it fills up; when it is full the list opens (1.8 s by default, adjustable in Settings).
+- Rest the pointer on the notch: it grows a little and a thin bar below it fills up; when it is full the list opens (1.8 s by default, adjustable in Settings). On a MacBook with a Dynamic Island a ring runs around the pill instead, and the list floats out of it. Clicking or tapping the notch opens the list right away.
 - Type and press Return to add a to-do. Click one to tick it off. Right-click to delete it.
 - **Clear done** removes ticked-off items. Esc or moving the pointer away closes the list (it stays open while you have unsent text).
 - Click **Tuck** in the open panel for Settings (hover delay, open at login, updates) and Quit.
